@@ -1,9 +1,9 @@
 # Agent Communication System
 
 ## エージェント構成
-- **PRESIDENT** (別セッション): 統括責任者
-- **boss1** (multiagent:0.0): チームリーダー
-- **worker1,2,3** (multiagent:0.1-3): 実行担当
+- **PRESIDENT** (Claude-president): 統括責任者
+- **boss1** (Claude-boss1): チームリーダー
+- **worker1,2,3** (Claude-worker1/2/3): 実行担当
 
 ## あなたの役割
 - **PRESIDENT**: @instructions/president.md
@@ -16,4 +16,13 @@
 ```
 
 ## 基本フロー
-PRESIDENT → boss1 → workers → boss1 → PRESIDENT 
+PRESIDENT → boss1 → workers → boss1 → PRESIDENT
+
+## ウィンドウ構成 (Git Bash版)
+各エージェントは独立したGit Bashウィンドウで動作します。
+ウィンドウタイトルで識別されます：
+- Claude-president
+- Claude-boss1
+- Claude-worker1
+- Claude-worker2
+- Claude-worker3
