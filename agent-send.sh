@@ -1,27 +1,50 @@
 #!/bin/bash
 
 # Agent間メッセージ送信スクリプト (Git Bash版)
-# PowerShell SendKeysを使用してウィンドウにキー入力を送信
+# 保存されたウィンドウハンドルを使用してメッセージを送信
+# ウィンドウが存在しない場合はエラー終了（新規ウィンドウは開かない）
 
-# エージェント→ウィンドウタイトル マッピング
-get_window_title() {
-    case "$1" in
-        "president") echo "Claude-president" ;;
-        "boss1") echo "Claude-boss1" ;;
-        "worker1") echo "Claude-worker1" ;;
-        "worker2") echo "Claude-worker2" ;;
-        "worker3") echo "Claude-worker3" ;;
-        *) echo "" ;;
-    esac
+HANDLES_DIR="./tmp/handles"
+
+# 保存されたハンドルを読み込む
+get_saved_handle() {
+    local agent="$1"
+    local handle_file="${HANDLES_DIR}/${agent}.hwnd"
+
+    if [[ -f "$handle_file" ]]; then
+        cat "$handle_file" | tr -d '\r\n'
+    else
+        echo ""
+    fi
+}
+
+# ハンドルが有効か確認
+check_handle_valid() {
+    local hwnd="$1"
+    local result
+    result=$(powershell.exe -Command "
+        Add-Type -TypeDefinition @'
+using System;
+using System.Runtime.InteropServices;
+public class Win32Check {
+    [DllImport(\"user32.dll\")] public static extern bool IsWindow(IntPtr hWnd);
+}
+'@
+        \$hwnd = [IntPtr]$hwnd
+        if ([Win32Check]::IsWindow(\$hwnd)) { 'VALID' } else { 'INVALID' }
+    " 2>/dev/null | tr -d '\r\n')
+
+    [[ "$result" == "VALID" ]]
 }
 
 show_usage() {
     cat << EOF
-Agent間メッセージ送信 (Git Bash版)
+Agent間メッセージ送信 (Git Bash版 - ウィンドウハンドル管理)
 
 使用方法:
   $0 [エージェント名] [メッセージ]
   $0 --list
+  $0 --status
 
 利用可能エージェント:
   president - プロジェクト統括責任者
@@ -34,6 +57,9 @@ Agent間メッセージ送信 (Git Bash版)
   $0 president "指示書に従って"
   $0 boss1 "Hello World プロジェクト開始指示"
   $0 worker1 "作業完了しました"
+
+注意:
+  先に ./setup.sh を実行してウィンドウを起動してください
 EOF
 }
 
@@ -41,11 +67,81 @@ EOF
 show_agents() {
     echo "利用可能なエージェント:"
     echo "=========================="
-    echo "  president → Claude-president   (プロジェクト統括責任者)"
-    echo "  boss1     → Claude-boss1       (チームリーダー)"
-    echo "  worker1   → Claude-worker1     (実行担当者A)"
-    echo "  worker2   → Claude-worker2     (実行担当者B)"
-    echo "  worker3   → Claude-worker3     (実行担当者C)"
+
+    if [[ ! -d "$HANDLES_DIR" ]]; then
+        echo "ERROR: ハンドルディレクトリが見つかりません"
+        echo "  先に ./setup.sh を実行してください"
+        exit 1
+    fi
+
+    local found_any=false
+    for agent in president boss1 worker1 worker2 worker3; do
+        local hwnd
+        hwnd=$(get_saved_handle "$agent")
+        if [[ -n "$hwnd" ]]; then
+            if check_handle_valid "$hwnd"; then
+                echo "  $agent → HWND: $hwnd (有効)"
+                found_any=true
+            else
+                echo "  $agent → HWND: $hwnd (無効 - ウィンドウが閉じられた)"
+            fi
+        else
+            echo "  $agent → 未登録"
+        fi
+    done
+
+    if [[ "$found_any" == false ]]; then
+        echo ""
+        echo "ERROR: 有効なエージェントが見つかりません"
+        echo "  先に ./setup.sh を実行してください"
+        exit 1
+    fi
+}
+
+# ステータス確認
+show_status() {
+    echo "エージェントステータス:"
+    echo "=========================="
+
+    if [[ ! -d "$HANDLES_DIR" ]]; then
+        echo "ERROR: ハンドルディレクトリが見つかりません"
+        echo "  先に ./setup.sh を実行してください"
+        exit 1
+    fi
+
+    local all_valid=true
+    local found_any=false
+
+    for agent in president boss1 worker1 worker2 worker3; do
+        local hwnd
+        hwnd=$(get_saved_handle "$agent")
+        if [[ -n "$hwnd" ]]; then
+            found_any=true
+            if check_handle_valid "$hwnd"; then
+                echo "  $agent: ✅ 有効 (HWND: $hwnd)"
+            else
+                echo "  $agent: ❌ 無効 (HWND: $hwnd - ウィンドウが閉じられた)"
+                all_valid=false
+            fi
+        else
+            echo "  $agent: ⚠️  未登録"
+            all_valid=false
+        fi
+    done
+
+    if [[ "$found_any" == false ]]; then
+        echo ""
+        echo "ERROR: 登録されたエージェントが見つかりません"
+        echo "  先に ./setup.sh を実行してください"
+        exit 1
+    fi
+
+    if [[ "$all_valid" == false ]]; then
+        echo ""
+        echo "WARNING: 一部のエージェントが無効です"
+        echo "  ./setup.sh を再実行してウィンドウを起動してください"
+        exit 1
+    fi
 }
 
 # ログ記録
@@ -58,87 +154,85 @@ log_send() {
     echo "[$timestamp] $agent: SENT - \"$message\"" >> logs/send_log.txt
 }
 
-# SendKeys用に特殊文字をエスケープ
-escape_for_sendkeys() {
-    local text="$1"
-    # SendKeysの特殊文字をエスケープ: + ^ % ~ { } [ ] ( )
-    text="${text//\{/\{\{\}}"
-    text="${text//\}/\{\}\}}"
-    text="${text//\+/\{+\}}"
-    text="${text//\^/\{^\}}"
-    text="${text//%/\{%\}}"
-    text="${text//~/\{~\}}"
-    text="${text//\(/\{(\}}"
-    text="${text//\)/\{)\}}"
-    text="${text//\[/\{[\}}"
-    text="${text//\]/\{]\}}"
-    echo "$text"
-}
-
-# メッセージ送信
-send_message() {
-    local title="$1"
+# メッセージ送信 (ウィンドウハンドルベース)
+send_message_by_hwnd() {
+    local hwnd="$1"
     local message="$2"
 
-    echo "送信中: $title <- '$message'"
+    echo "送信中: HWND $hwnd <- '$message'"
 
-    # メッセージをエスケープ
-    local escaped_message
-    escaped_message=$(escape_for_sendkeys "$message")
+    # メッセージをBase64エンコード（日本語対応）
+    local encoded_msg
+    encoded_msg=$(echo -n "$message" | base64 -w 0)
 
-    # PowerShellでキー送信
-    powershell.exe -Command "
-        Add-Type -AssemblyName System.Windows.Forms
-        Add-Type -AssemblyName Microsoft.VisualBasic
-
-        \$wshell = New-Object -ComObject wscript.shell
-
-        # ウィンドウをアクティブ化
-        \$activated = \$wshell.AppActivate('$title')
-        if (-not \$activated) {
-            Write-Host 'ERROR: Window not found: $title'
-            exit 1
-        }
-        Start-Sleep -Milliseconds 300
-
-        # Ctrl+C で現在の入力をクリア
-        [System.Windows.Forms.SendKeys]::SendWait('^c')
-        Start-Sleep -Milliseconds 200
-
-        # メッセージを送信
-        [System.Windows.Forms.SendKeys]::SendWait('$escaped_message')
-        Start-Sleep -Milliseconds 100
-
-        # Enterキー
-        [System.Windows.Forms.SendKeys]::SendWait('{ENTER}')
-    " 2>/dev/null
-
-    return $?
-}
-
-# ウィンドウ存在確認
-check_window() {
-    local title="$1"
-
-    # PowerShellでウィンドウを検索
+    # PowerShellでウィンドウハンドルに直接キー送信
     local result
     result=$(powershell.exe -Command "
-        Add-Type -AssemblyName Microsoft.VisualBasic
-        \$wshell = New-Object -ComObject wscript.shell
-        if (\$wshell.AppActivate('$title')) {
-            Write-Output 'FOUND'
-        } else {
-            Write-Output 'NOT_FOUND'
-        }
-    " 2>/dev/null)
+        Add-Type -AssemblyName System.Windows.Forms
 
-    if [[ "$result" == *"NOT_FOUND"* ]]; then
-        echo "ERROR: ウィンドウ '$title' が見つかりません"
-        echo "  先に ./setup.sh を実行してウィンドウを起動してください"
+        Add-Type -TypeDefinition @'
+using System;
+using System.Runtime.InteropServices;
+public class Win32Send {
+    [DllImport(\"user32.dll\")] public static extern bool SetForegroundWindow(IntPtr hWnd);
+    [DllImport(\"user32.dll\")] public static extern bool ShowWindow(IntPtr hWnd, int nCmdShow);
+    [DllImport(\"user32.dll\")] public static extern void keybd_event(byte bVk, byte bScan, uint dwFlags, UIntPtr dwExtraInfo);
+    [DllImport(\"user32.dll\")] public static extern bool IsWindow(IntPtr hWnd);
+}
+'@
+
+        \$hwnd = [IntPtr]$hwnd
+        \$encodedMsg = '$encoded_msg'
+        \$msg = [System.Text.Encoding]::UTF8.GetString([Convert]::FromBase64String(\$encodedMsg))
+
+        try {
+            if (-not [Win32Send]::IsWindow(\$hwnd)) {
+                Write-Output 'ERROR: Invalid window handle'
+                exit 1
+            }
+
+            # Altキーを押す（フォアグラウンド制限回避）
+            [Win32Send]::keybd_event(0x12, 0, 0, [UIntPtr]::Zero)
+            Start-Sleep -Milliseconds 50
+            [Win32Send]::keybd_event(0x12, 0, 2, [UIntPtr]::Zero)
+            Start-Sleep -Milliseconds 50
+
+            # ウィンドウを復元 (SW_RESTORE = 9)
+            [Win32Send]::ShowWindow(\$hwnd, 9) | Out-Null
+            Start-Sleep -Milliseconds 100
+
+            # フォアグラウンドに設定
+            [Win32Send]::SetForegroundWindow(\$hwnd) | Out-Null
+            Start-Sleep -Milliseconds 300
+
+            # Ctrl+C で現在の入力をクリア
+            [System.Windows.Forms.SendKeys]::SendWait('^c')
+            Start-Sleep -Milliseconds 200
+
+            # メッセージを送信（特殊文字をエスケープ）
+            \$escapedMsg = \$msg -replace '([+^%~{}\[\]()])', '{\$1}'
+            [System.Windows.Forms.SendKeys]::SendWait(\$escapedMsg)
+            Start-Sleep -Milliseconds 100
+
+            # Enterキー（Windows改行: 2回送信で確実に実行）
+            [System.Windows.Forms.SendKeys]::SendWait('{ENTER}')
+            Start-Sleep -Milliseconds 100
+            [System.Windows.Forms.SendKeys]::SendWait('{ENTER}')
+
+            Write-Output 'SUCCESS'
+        } catch {
+            Write-Output ('ERROR: ' + \$_.Exception.Message)
+            exit 1
+        }
+    " 2>&1 | tr -d '\r')
+
+    echo "$result"
+
+    if [[ "$result" == *"SUCCESS"* ]]; then
+        return 0
+    else
         return 1
     fi
-
-    return 0
 }
 
 # メイン処理
@@ -154,6 +248,12 @@ main() {
         exit 0
     fi
 
+    # --statusオプション
+    if [[ "$1" == "--status" ]]; then
+        show_status
+        exit 0
+    fi
+
     if [[ $# -lt 2 ]]; then
         show_usage
         exit 1
@@ -162,26 +262,36 @@ main() {
     local agent_name="$1"
     local message="$2"
 
-    # ウィンドウタイトル取得
-    local title
-    title=$(get_window_title "$agent_name")
-
-    if [[ -z "$title" ]]; then
-        echo "ERROR: 不明なエージェント '$agent_name'"
-        echo "利用可能エージェント: $0 --list"
+    # ハンドルファイル確認
+    if [[ ! -d "$HANDLES_DIR" ]]; then
+        echo "ERROR: ハンドルディレクトリが見つかりません"
+        echo "  先に ./setup.sh を実行してください"
         exit 1
     fi
 
-    # ウィンドウ確認
-    if ! check_window "$title"; then
+    # 保存されたハンドルを取得
+    local hwnd
+    hwnd=$(get_saved_handle "$agent_name")
+
+    if [[ -z "$hwnd" ]]; then
+        echo "ERROR: エージェント '$agent_name' のハンドルが登録されていません"
+        echo "  先に ./setup.sh を実行してください"
         exit 1
     fi
+
+    # ハンドルが有効か確認
+    if ! check_handle_valid "$hwnd"; then
+        echo "ERROR: エージェント '$agent_name' のウィンドウが閉じられています (HWND: $hwnd)"
+        echo "  先に ./setup.sh を実行してウィンドウを起動してください"
+        exit 1
+    fi
+
+    echo "ウィンドウ検出: HWND = $hwnd"
 
     # メッセージ送信
-    if send_message "$title" "$message"; then
-        # ログ記録
+    if send_message_by_hwnd "$hwnd" "$message"; then
         log_send "$agent_name" "$message"
-        echo "送信完了: $agent_name に '$message'"
+        echo "送信完了: $agent_name (HWND: $hwnd) に '$message'"
     else
         echo "ERROR: メッセージ送信に失敗しました"
         exit 1

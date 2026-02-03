@@ -29,11 +29,12 @@ git clone https://github.com/nishimoto265/Claude-Code-Communication.git
 cd Claude-Code-Communication
 ```
 
-#### 2. 環境構築（1分）
+#### 2. 環境構築＆Claude起動（2分）
 ```bash
 ./setup.sh
 ```
-これで5つのGit Bashウィンドウが自動で開きます！
+これで5つのGit Bashウィンドウが開き、各ウィンドウでClaudeが自動起動します！
+各ウィンドウでブラウザ認証を完了してください。
 
 ```
 ┌─────────────────────┐
@@ -47,13 +48,7 @@ cd Claude-Code-Communication
 └───────────┴───────────┘
 ```
 
-#### 3. 全エージェントでClaude起動（2分）
-```bash
-./launch-agents.sh
-```
-各ウィンドウでブラウザ認証を完了してください。
-
-#### 4. 魔法の言葉を入力（30秒）
+#### 3. 魔法の言葉を入力（30秒）
 
 PRESIDENTウィンドウ（Claude-president）で入力：
 ```
@@ -121,8 +116,7 @@ PowerShell SendKeysを使用して、ウィンドウタイトルで対象を特�
 システム全体の設定ファイル
 
 ### スクリプト
-- **setup.sh** - 環境構築（5つのウィンドウ起動）
-- **launch-agents.sh** - 全エージェントでClaude起動
+- **setup.sh** - 環境構築（5つのウィンドウ起動＆Claude自動起動）
 - **agent-send.sh** - メッセージ送信
 - **project-status.sh** - 進捗確認
 
