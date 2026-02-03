@@ -1,10 +1,12 @@
 #!/bin/bash
 
-# Agent間メッセージ送信スクリプト (Git Bash版)
-# 保存されたウィンドウハンドルを使用してメッセージを送信
-# ウィンドウが存在しない場合はエラー終了（新規ウィンドウは開かない）
+# Agent間メッセージ送信スクリプト (Git Bash版 - ファイルベース)
+# メッセージをファイルに保存し、短い通知をウィンドウに送信
+# 複数行メッセージに対応
 
 HANDLES_DIR="./tmp/handles"
+MESSAGES_DIR="./messages"
+SCRIPT_DIR="$(cd "$(dirname "$0")" && pwd)"
 
 # 保存されたハンドルを読み込む
 get_saved_handle() {
@@ -39,10 +41,10 @@ public class Win32Check {
 
 show_usage() {
     cat << EOF
-Agent間メッセージ送信 (Git Bash版 - ウィンドウハンドル管理)
+Agent間メッセージ送信 (Git Bash版 - ファイルベース)
 
 使用方法:
-  $0 [エージェント名] [メッセージ]
+  $0 [エージェント名] "[メッセージ]"
   $0 --list
   $0 --status
 
@@ -147,84 +149,128 @@ show_status() {
 # ログ記録
 log_send() {
     local agent="$1"
-    local message="$2"
+    local msg_file="$2"
     local timestamp=$(date '+%Y-%m-%d %H:%M:%S')
 
     mkdir -p logs
-    echo "[$timestamp] $agent: SENT - \"$message\"" >> logs/send_log.txt
+    echo "[$timestamp] → $agent: $msg_file" >> logs/send_log.txt
 }
 
-# メッセージ送信 (ウィンドウハンドルベース)
-send_message_by_hwnd() {
-    local hwnd="$1"
+# メッセージをファイルに保存
+save_message() {
+    local agent="$1"
     local message="$2"
+    local timestamp=$(date '+%Y%m%d_%H%M%S')
+    local msg_dir="${MESSAGES_DIR}/${agent}"
 
-    echo "送信中: HWND $hwnd <- '$message'"
+    mkdir -p "$msg_dir"
 
-    # メッセージをBase64エンコード（日本語対応）
+    local msg_file="${msg_dir}/${timestamp}.msg"
+    echo "$message" > "$msg_file"
+
+    echo "$msg_file"
+}
+
+# 短い通知をウィンドウに送信 (keybd_event + VkKeyScanW - クリップボード不使用)
+send_notification() {
+    local hwnd="$1"
+    local notification="$2"
+
+    # 通知をBase64エンコード
     local encoded_msg
-    encoded_msg=$(echo -n "$message" | base64 -w 0)
+    encoded_msg=$(echo -n "$notification" | base64 -w 0)
 
-    # PowerShellでウィンドウハンドルに直接キー送信
-    local result
-    result=$(powershell.exe -Command "
-        Add-Type -AssemblyName System.Windows.Forms
+    # PowerShellスクリプトをファイルに書き出して実行
+    local ps_script="./tmp/send_notify.ps1"
+    cat > "$ps_script" << 'PSEOF'
+param([string]$TargetHwnd, [string]$EncodedMsg)
 
-        Add-Type -TypeDefinition @'
+Add-Type -TypeDefinition @"
 using System;
 using System.Runtime.InteropServices;
-public class Win32Send {
-    [DllImport(\"user32.dll\")] public static extern bool SetForegroundWindow(IntPtr hWnd);
-    [DllImport(\"user32.dll\")] public static extern bool ShowWindow(IntPtr hWnd, int nCmdShow);
-    [DllImport(\"user32.dll\")] public static extern void keybd_event(byte bVk, byte bScan, uint dwFlags, UIntPtr dwExtraInfo);
-    [DllImport(\"user32.dll\")] public static extern bool IsWindow(IntPtr hWnd);
+public class Win32Key {
+    [DllImport("user32.dll")] public static extern bool SetForegroundWindow(IntPtr hWnd);
+    [DllImport("user32.dll")] public static extern bool ShowWindow(IntPtr hWnd, int nCmdShow);
+    [DllImport("user32.dll")] public static extern bool IsWindow(IntPtr hWnd);
+    [DllImport("user32.dll")] public static extern void keybd_event(byte bVk, byte bScan, uint dwFlags, UIntPtr dwExtraInfo);
+    [DllImport("user32.dll")] public static extern bool AttachThreadInput(uint idAttach, uint idAttachTo, bool fAttach);
+    [DllImport("user32.dll")] public static extern uint GetWindowThreadProcessId(IntPtr hWnd, out uint lpdwProcessId);
+    [DllImport("kernel32.dll")] public static extern uint GetCurrentThreadId();
+    [DllImport("user32.dll")] public static extern IntPtr GetForegroundWindow();
+    [DllImport("user32.dll")] public static extern short VkKeyScanW(char ch);
+    [DllImport("user32.dll")] public static extern bool PostMessage(IntPtr hWnd, uint Msg, IntPtr wParam, IntPtr lParam);
 }
-'@
+"@
 
-        \$hwnd = [IntPtr]$hwnd
-        \$encodedMsg = '$encoded_msg'
-        \$msg = [System.Text.Encoding]::UTF8.GetString([Convert]::FromBase64String(\$encodedMsg))
+$hwnd = [IntPtr]::new([long]$TargetHwnd)
+$msg = [System.Text.Encoding]::UTF8.GetString([Convert]::FromBase64String($EncodedMsg))
 
-        try {
-            if (-not [Win32Send]::IsWindow(\$hwnd)) {
-                Write-Output 'ERROR: Invalid window handle'
-                exit 1
-            }
+try {
+    if (-not [Win32Key]::IsWindow($hwnd)) {
+        Write-Output "ERROR: Invalid window handle $TargetHwnd"
+        exit 1
+    }
 
-            # Altキーを押す（フォアグラウンド制限回避）
-            [Win32Send]::keybd_event(0x12, 0, 0, [UIntPtr]::Zero)
-            Start-Sleep -Milliseconds 50
-            [Win32Send]::keybd_event(0x12, 0, 2, [UIntPtr]::Zero)
-            Start-Sleep -Milliseconds 50
+    # AttachThreadInput でフォアグラウンド制限を回避
+    $currentThread = [Win32Key]::GetCurrentThreadId()
+    $targetProcessId = [uint32]0
+    $targetThread = [Win32Key]::GetWindowThreadProcessId($hwnd, [ref]$targetProcessId)
 
-            # ウィンドウを復元 (SW_RESTORE = 9)
-            [Win32Send]::ShowWindow(\$hwnd, 9) | Out-Null
-            Start-Sleep -Milliseconds 100
+    $fgWnd = [Win32Key]::GetForegroundWindow()
+    $fgProcessId = [uint32]0
+    $fgThread = [Win32Key]::GetWindowThreadProcessId($fgWnd, [ref]$fgProcessId)
 
-            # フォアグラウンドに設定
-            [Win32Send]::SetForegroundWindow(\$hwnd) | Out-Null
-            Start-Sleep -Milliseconds 300
+    $attached1 = [Win32Key]::AttachThreadInput($currentThread, $fgThread, $true)
+    $attached2 = [Win32Key]::AttachThreadInput($currentThread, $targetThread, $true)
 
-            # Ctrl+C で現在の入力をクリア
-            [System.Windows.Forms.SendKeys]::SendWait('^c')
-            Start-Sleep -Milliseconds 200
+    # ウィンドウを復元して前面に
+    [Win32Key]::ShowWindow($hwnd, 9) | Out-Null
+    Start-Sleep -Milliseconds 100
+    $fgResult = [Win32Key]::SetForegroundWindow($hwnd)
+    Start-Sleep -Milliseconds 400
 
-            # メッセージを送信（特殊文字をエスケープ）
-            \$escapedMsg = \$msg -replace '([+^%~{}\[\]()])', '{\$1}'
-            [System.Windows.Forms.SendKeys]::SendWait(\$escapedMsg)
-            Start-Sleep -Milliseconds 100
+    # デタッチ
+    if ($attached1) { [Win32Key]::AttachThreadInput($currentThread, $fgThread, $false) | Out-Null }
+    if ($attached2) { [Win32Key]::AttachThreadInput($currentThread, $targetThread, $false) | Out-Null }
 
-            # Enterキー（Windows改行: 2回送信で確実に実行）
-            [System.Windows.Forms.SendKeys]::SendWait('{ENTER}')
-            Start-Sleep -Milliseconds 100
-            [System.Windows.Forms.SendKeys]::SendWait('{ENTER}')
+    # メッセージを keybd_event + VkKeyScanW で1文字ずつ入力
+    foreach ($char in $msg.ToCharArray()) {
+        $vkResult = [Win32Key]::VkKeyScanW($char)
+        if ($vkResult -eq -1) { continue }
 
-            Write-Output 'SUCCESS'
-        } catch {
-            Write-Output ('ERROR: ' + \$_.Exception.Message)
-            exit 1
-        }
-    " 2>&1 | tr -d '\r')
+        $vkCode = [byte]($vkResult -band 0xFF)
+        $shiftState = ($vkResult -shr 8) -band 0xFF
+        $needShift = ($shiftState -band 1) -ne 0
+
+        if ($needShift) { [Win32Key]::keybd_event(0x10, 0, 0, [UIntPtr]::Zero) }
+        [Win32Key]::keybd_event($vkCode, 0, 0, [UIntPtr]::Zero)
+        Start-Sleep -Milliseconds 5
+        [Win32Key]::keybd_event($vkCode, 0, 2, [UIntPtr]::Zero)
+        if ($needShift) { [Win32Key]::keybd_event(0x10, 0, 2, [UIntPtr]::Zero) }
+        Start-Sleep -Milliseconds 10
+    }
+
+    # keybd_event のテキストが入力キュー経由でターミナルに到達するのを待つ
+    Start-Sleep -Milliseconds 1000
+
+    # Enter キー（SendKeys で確実に送信）
+    Add-Type -AssemblyName System.Windows.Forms
+    [System.Windows.Forms.SendKeys]::SendWait('{ENTER}')
+    Start-Sleep -Milliseconds 200
+
+    Write-Output "SUCCESS (fg=$fgResult)"
+} catch {
+    Write-Output ("ERROR: " + $_.Exception.Message)
+    exit 1
+}
+PSEOF
+
+    # LF→CRLF変換（PowerShellのhere-stringはCRLFが必要）
+    sed -i 's/$/\r/' "$ps_script"
+
+    # PowerShellスクリプトをファイルから実行
+    local result
+    result=$(powershell.exe -ExecutionPolicy Bypass -File "$(cygpath -w "$ps_script")" -TargetHwnd "$hwnd" -EncodedMsg "$encoded_msg" 2>&1 | tr -d '\r')
 
     echo "$result"
 
@@ -288,12 +334,25 @@ main() {
 
     echo "ウィンドウ検出: HWND = $hwnd"
 
-    # メッセージ送信
-    if send_message_by_hwnd "$hwnd" "$message"; then
-        log_send "$agent_name" "$message"
-        echo "送信完了: $agent_name (HWND: $hwnd) に '$message'"
+    # メッセージをファイルに保存
+    local msg_file
+    msg_file=$(save_message "$agent_name" "$message")
+    echo "メッセージ保存: $msg_file"
+
+    # 絶対パスを取得
+    local abs_msg_file
+    abs_msg_file=$(cd "$SCRIPT_DIR" && realpath "$msg_file" 2>/dev/null || echo "${SCRIPT_DIR}/${msg_file}")
+
+    # 短い通知をウィンドウに送信（ASCII のみ - VkKeyScanW 対応）
+    local notification="Read ${abs_msg_file} and follow the instructions."
+
+    echo "通知送信中..."
+    if send_notification "$hwnd" "$notification"; then
+        log_send "$agent_name" "$msg_file"
+        echo "送信完了: $agent_name (HWND: $hwnd)"
+        echo "  メッセージファイル: $msg_file"
     else
-        echo "ERROR: メッセージ送信に失敗しました"
+        echo "ERROR: 通知送信に失敗しました"
         exit 1
     fi
 
